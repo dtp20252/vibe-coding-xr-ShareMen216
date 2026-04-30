@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>XR Lab: Chemistry Scale Experiment</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <script>
+      window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/addons/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import 'xrblocks/addons/simulator/SimulatorAddons.js';
+      import * as THREE from 'three';
+      import * as xb from 'xrblocks';
+
+      class ChemistryLabScript extends xb.Script {
+        constructor() {
+          super();
+          this.testTubes = [];
+          this.grabStates = new Map(); // handIndex -> { object, offset }
+          this.currentWeight = 0;
+        }
+
+        init() {
+          // 1. Lighting
+          this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
+          const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+          dirLight.position.set(1, 2, 1);
+          this.add(dirLight);
+
+          // 2. The Scale
+          this.createScale();
+
+          // 3. Test Tubes
+          const tubeData = [
+            { mass: 5, color: 0xff00ff, x: -0.25, z: 0.25 },
+            { mass: 10, color: 0xff4444, x: -0.4, z: 0.1 },
+            { mass: 25, color: 0x44ff44, x: -0.5, z: -0.1 },
+            { mass: 50, color: 0x4444ff, x: 0.5, z: -0.1 },
+            { mass: 100, color: 0xffff44, x: 0.4, z: 0.1 },
+            { mass: 200, color: 0x00ffff, x: 0.25, z: 0.25 }
+          ];
+
+          tubeData.forEach(data => this.createTestTube(data));
+        }
+
+        createScale() {
+          const scaleGroup = new THREE.Group();
+          
+          // Base
+          const baseGeom = new THREE.BoxGeometry(0.4, 0.05, 0.4);
+          const baseMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+          const base = new THREE.Mesh(baseGeom, baseMat);
+          scaleGroup.add(base);
+
+          // Weighing Platform
+          const plateGeom = new THREE.CylinderGeometry(0.15, 0.15, 0.02, 32);
+          const plateMat = new THREE.MeshPhongMaterial({ color: 0xcccccc, shininess: 100 });
+          this.plate = new THREE.Mesh(plateGeom, plateMat);
+          this.plate.position.y = 0.04;
+          scaleGroup.add(this.plate);
+
+          // Digital Display Panel
+          this.displayPanel = new xb.SpatialPanel({
+            width: 0.3,
+            height: 0.15,
+            backgroundColor: '#000000aa'
+          });
+          this.displayPanel.position.set(0, 0.15, -0.1);
+          this.displayPanel.rotation.x = -Math.PI / 4;
+          scaleGroup.add(this.displayPanel);
+
+          this.weightText = this.displayPanel.addGrid().addRow().addText({
+            text: '0.00g',
+            fontSize: 0.06,
+            fontColor: '#00ff00'
+          });
+
+          scaleGroup.position.set(0, 0.8, -xb.user.objectDistance);
+          this.add(scaleGroup);
+          this.scaleBase = scaleGroup;
+        }
+
+        createTestTube(data) {
+          const tubeGroup = new THREE.Group();
+          
+          // Glass body
+          const geom = new THREE.CylinderGeometry(0.02, 0.02, 0.15, 16);
+          const mat = new THREE.MeshPhongMaterial({ 
+            color: data.color, 
+            transparent: true, 
+            opacity: 0.6 
+          });
+          const mesh = new THREE.Mesh(geom, mat);
+          tubeGroup.add(mesh);
+
+          // Label
+          const labelPanel = new xb.SpatialPanel({ width: 0.05, height: 0.03, backgroundColor: '#ffffff' });
+          labelPanel.addGrid().addRow().addText({ text: `${data.mass}g`, fontSize: 0.01, fontColor: '#000000' });
+          labelPanel.position.y = 0.04;
+          labelPanel.position.z = 0.021;
+          tubeGroup.add(labelPanel);
+
+          tubeGroup.position.set(data.x, 0.9, -xb.user.objectDistance + (data.z || 0.2));
+          tubeGroup.userData = { mass: data.mass, isGrabbed: false };
+          
+          this.add(tubeGroup);
+          this.testTubes.push(tubeGroup);
+        }
+
+        // --- Interaction Logic ---
+
+        onSelectStart(event) {
+          const controller = event.target;
+          let closestTube = null;
+          let minDistance = 0.25; // Increased to 25cm grab radius for easier grabbing
+
+          // Get the world position of the hand/controller
+          const controllerPos = new THREE.Vector3();
+          controller.getWorldPosition(controllerPos);
+
+          // Find the closest test tube to the hand
+          this.testTubes.forEach(tube => {
+            if (tube.userData.isGrabbed) return;
+            
+            const tubePos = new THREE.Vector3();
+            tube.getWorldPosition(tubePos);
+            
+            const dist = controllerPos.distanceTo(tubePos);
+            if (dist < minDistance) {
+              minDistance = dist;
+              closestTube = tube;
+            }
+          });
+
+          // If no tube is close enough, do nothing
+          if (!closestTube) return;
+
+          closestTube.userData.isGrabbed = true;
+          
+          // Ensure matrices are fresh before calculating offsets
+          closestTube.updateMatrixWorld(true);
+          controller.updateMatrixWorld(true);
+          
+          // Calculate the offset between the hand and the tube so it doesn't snap awkwardly
+          const H0inv = new THREE.Matrix4().copy(controller.matrixWorld).invert();
+          const O0 = new THREE.Matrix4().copy(closestTube.matrixWorld);
+          const offset = new THREE.Matrix4().multiplyMatrices(H0inv, O0);
+          
+          this.grabStates.set(controller.userData.id, { tube: closestTube, offset });
+        }
+
+        onSelecting(event) {
+          const controller = event.target;
+          const state = this.grabStates.get(controller.userData.id);
+          if (!state) return;
+
+          const { tube, offset } = state;
+          controller.updateMatrixWorld(true);
+
+          // Compute new world matrix: ControllerWorld * Offset
+          const newWorldMatrix = new THREE.Matrix4().multiplyMatrices(controller.matrixWorld, offset);
+          
+          // Apply to tube (local to its parent)
+          const parent = tube.parent;
+          if (parent) parent.updateMatrixWorld(true);
+          const parentInv = parent ? new THREE.Matrix4().copy(parent.matrixWorld).invert() : new THREE.Matrix4().identity();
+          
+          const localMatrix = new THREE.Matrix4().multiplyMatrices(parentInv, newWorldMatrix);
+          localMatrix.decompose(tube.position, tube.quaternion, tube.scale);
+          tube.updateMatrix();
+        }
+
+        onSelectEnd(event) {
+          const controller = event.target;
+          const state = this.grabStates.get(controller.userData.id);
+          if (state) {
+            state.tube.userData.isGrabbed = false;
+            this.grabStates.delete(controller.userData.id);
+          }
+        }
+
+        update() {
+          let totalMass = 0;
+          const plateWorldPos = new THREE.Vector3();
+          this.plate.getWorldPosition(plateWorldPos);
+
+          this.testTubes.forEach(tube => {
+            // Simple proximity "weighing" logic
+            // Check if tube is near the plate surface and not currently held
+            const tubeWorldPos = new THREE.Vector3();
+            tube.getWorldPosition(tubeWorldPos);
+
+            const horizontalDist = new THREE.Vector2(tubeWorldPos.x - plateWorldPos.x, tubeWorldPos.z - plateWorldPos.z).length();
+            const verticalDist = tubeWorldPos.y - plateWorldPos.y;
+
+            // If it's within the plate radius and just above the surface
+            if (horizontalDist < 0.15 && verticalDist > 0 && verticalDist < 0.15 && !tube.userData.isGrabbed) {
+              totalMass += tube.userData.mass;
+              // Snap to plate surface visually
+              tube.position.y = plateWorldPos.y + 0.075; 
+            }
+          });
+
+          // Update UI
+          if (this.weightText) {
+            this.weightText.setText(`${totalMass.toFixed(2)}g`);
+          }
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        const options = new xb.Options();
+        options.enableUI();
+        options.enableHands();
+        options.hands.visualization = true;
+        // Turn on the simulator and set it to hand tracking/pose mode
+        options.simulator.defaultMode = xb.SimulatorMode.POSE;
+
+        xb.add(new ChemistryLabScript());
+        xb.init(options);
+      });
+    </script>
+  </body>
+</html>
